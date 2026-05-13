@@ -399,77 +399,151 @@ function calcBatter(s){
 }
 
 // ═══ FETCH ═══════════════════════════════════════════════
-async function jfetch(url,proxy=false){const u=proxy?PROXY+encodeURIComponent(url):url;const r=await fetch(u,{headers:{'Accept':'application/json'}});if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
-// Multi-proxy fetch: tries 3 CORS proxies in sequence for reliability
-const PROXIES=[
-  u=>`https://corsproxy.io/?${encodeURIComponent(u)}`,
-  u=>`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-  u=>`https://corsproxy.org/?${encodeURIComponent(u)}`,
+// Multiple CORS proxies for reliability
+const PROXIES2=[
+  u=>'https://corsproxy.io/?'+encodeURIComponent(u),
+  u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+  u=>'https://corsproxy.org/?'+encodeURIComponent(u),
 ];
-async function tfetch(url,timeout=12000){
-  for(const mkProxy of PROXIES){
+async function jfetch(url,useProxy){
+  const u=useProxy?PROXY+encodeURIComponent(url):url;
+  const r=await fetch(u,{headers:{'Accept':'application/json'}});
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  return r.json();
+}
+async function mlbF(url){
+  try{return await jfetch(url);}
+  catch(e){return await jfetch(url,true);}
+}
+async function proxyFetch(url){
+  // Try each proxy in sequence, return text on first success
+  for(let i=0;i<PROXIES2.length;i++){
     try{
       const ctrl=new AbortController();
-      const tid=setTimeout(()=>ctrl.abort(),timeout);
-      const r=await fetch(mkProxy(url),{signal:ctrl.signal});
+      const tid=setTimeout(function(){ctrl.abort();},12000);
+      const r=await fetch(PROXIES2[i](url),{signal:ctrl.signal});
       clearTimeout(tid);
-      if(r.ok){const t=await r.text();if(t&&t.length>10&&!t.includes('error')&&!t.includes('Host not'))return t;}
-    }catch(e){}
+      if(r.ok){
+        const t=await r.text();
+        if(t&&t.length>10&&t.indexOf('Host not')<0&&t.indexOf('<html')<0)return t;
+      }
+    }catch(e2){}
   }
-  // last resort: direct (works if Savant doesn't CORS-block)
-  try{const r=await fetch(url);if(r.ok)return r.text();}catch(e){}
-  throw new Error('All proxies failed for '+url.split('?')[0]);
+  // Direct fallback
+  try{const r=await fetch(url);if(r.ok)return r.text();}catch(e3){}
+  return null; // return null instead of throwing, callers handle null
 }
-async function mlbF(url){try{return await jfetch(url);}catch{return await jfetch(url,true);}}
 function parseCSV(txt){
-  if(!txt||typeof txt!=='string')return[];
-  const trimmed=txt.trim();
-  const fc=trimmed[0];
-  // Reject HTML/JSON error responses (real CSV starts with a letter or quote)
-  if(fc==='<'||fc==='{' ||fc==='['||trimmed.slice(0,50).toLowerCase().includes('<html'))return[];
-  const lines=trimmed.split('\n');
+  if(!txt||typeof txt!=='string'||txt.length<5)return[];
+  var trimmed=txt.trim();
+  // Reject HTML/JSON error pages
+  if(trimmed.charAt(0)==='<')return[];
+  var lines=trimmed.split('\n');
   if(lines.length<2)return[];
-  const h=csvRow(lines[0]).map(x=>x.replace(/"/g,'').trim().toLowerCase());
-  return lines.slice(1).filter(l=>l.trim()).map(l=>{const c=csvRow(l);const r={};h.forEach((k,i)=>r[k]=(c[i]||'').replace(/"/g,'').trim());return r;});
+  // Lowercase all header names for consistent matching
+  var h=lines[0].split(',').map(function(x){return x.replace(/"/g,'').trim().toLowerCase();});
+  var out=[];
+  for(var i=1;i<lines.length;i++){
+    if(!lines[i].trim())continue;
+    var cols=splitCSV(lines[i]);
+    var row={};
+    for(var j=0;j<h.length;j++){row[h[j]]=(cols[j]||'').replace(/"/g,'').trim();}
+    out.push(row);
+  }
+  return out;
 }
-function csvRow(l){const r=[];let cur='',q=false;for(const c of l){if(c==='"'){q=!q;continue;}if(c===','&&!q){r.push(cur);cur='';continue;}cur+=c;}r.push(cur);return r;}
-
+function splitCSV(line){
+  var r=[],cur='',q=false;
+  for(var i=0;i<line.length;i++){
+    var c=line[i];
+    if(c==='"'){q=!q;continue;}
+    if(c===','&&!q){r.push(cur);cur='';continue;}
+    cur+=c;
+  }
+  r.push(cur);
+  return r;
+}
 async function findPlayer(name){
-  const d=await mlbF(`${MLB}/people/search?names=${encodeURIComponent(name)}&sportId=1`);
-  const p=d.people||[];if(!p.length)throw new Error(`No player found: "${name}"`);
-  return p.sort((a,b)=>((b.active?1:0)-(a.active?1:0))||((b.currentAge||0)-(a.currentAge||0)))[0];
+  var url=MLB+'/people/search?names='+encodeURIComponent(name)+'&sportId=1';
+  var data=await mlbF(url);
+  var ppl=data.people||[];
+  if(!ppl.length)throw new Error('No player found: "'+name+'"');
+  ppl.sort(function(a,b){return((b.active?1:0)-(a.active?1:0))||((b.currentAge||0)-(a.currentAge||0));});
+  return ppl[0];
 }
-async function getStats(id,group,yr){try{const d=await mlbF(`${MLB}/people/${id}/stats?stats=season&group=${group}&season=${yr}&sportId=1`);return d?.stats?.[0]?.splits?.[0]?.stat||null;}catch{return null;}}
-async function getFielding(id,yr){try{const d=await mlbF(`${MLB}/people/${id}/stats?stats=season&group=fielding&season=${yr}&sportId=1`);return d?.stats?.[0]?.splits||[];}catch{return[];}}
-async function getGameLog(id,group,yr,n=7){try{const d=await mlbF(`${MLB}/people/${id}/stats?stats=gameLog&group=${group}&season=${yr}&sportId=1`);return(d?.stats?.[0]?.splits||[]).slice(-n).reverse();}catch{return[];}}
-async function savBat(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=batter&filter=&sort=4&sortDir=desc&min=1&selections=xba,xslg,xwoba,xobp,xiso,woba,wrc_plus,exit_velocity_avg,launch_angle_avg,barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));// All keys lowercased; Savant uses player_id for MLBAM ID
-    const row=rows.find(r=>String(r.player_id||r.xmlbamid||r.mlbam_id||'')===String(id));
-    if(row){row.wRC_plus=nv(row.wrc_plus);return row;}
-    return null;}catch{return null;}}
-async function savPitchPlus(id,yr){
+async function getStats(id,group,yr){
   try{
-    const raw=await tfetch(`${SAV}/leaderboard/pitching-plus?year=${yr}&csv=true`);
-    const rows=parseCSV(raw);
-    if(!rows.length)return null;
-    // Try multiple possible ID column names Savant has used over the years
-    // All keys are lowercase now (parseCSV lowercases headers)
-    const match=rows.find(r=>{
-      const rid=String(r.player_id||r.pitcher_id||r.mlbam_id||r.xmlbamid||r.idfg||'');
-      return rid===String(id);
-    });
-    if(match){
-      return{
-        stuff_plus:    nv(match.stuff_plus)    ??nv(match['stuff_plus_stuff_plus'])    ??null,
-        location_plus: nv(match.location_plus) ??nv(match['location_plus_location_plus'])??null,
-        pitching_plus: nv(match.pitching_plus) ??nv(match['pitching_plus_pitching_plus'])??null,
-        player_name:   match.player_name||match.pitcher_name||null,
-      };
+    var data=await mlbF(MLB+'/people/'+id+'/stats?stats=season&group='+group+'&season='+yr+'&sportId=1');
+    return(data&&data.stats&&data.stats[0]&&data.stats[0].splits&&data.stats[0].splits[0])?data.stats[0].splits[0].stat:null;
+  }catch(e){return null;}
+}
+async function getFielding(id,yr){
+  try{
+    var data=await mlbF(MLB+'/people/'+id+'/stats?stats=season&group=fielding&season='+yr+'&sportId=1');
+    return(data&&data.stats&&data.stats[0])?data.stats[0].splits||[]:[];
+  }catch(e){return[];}
+}
+async function getGameLog(id,group,yr,n){
+  n=n||7;
+  try{
+    var data=await mlbF(MLB+'/people/'+id+'/stats?stats=gameLog&group='+group+'&season='+yr+'&sportId=1');
+    var splits=(data&&data.stats&&data.stats[0])?data.stats[0].splits||[]:[];
+    return splits.slice(-n).reverse();
+  }catch(e){return[];}
+}
+async function savBat(id,yr){
+  var url=SAV+'/leaderboard/custom?year='+yr+'&type=batter&filter=&sort=4&sortDir=desc&min=1'+
+    '&selections=xba,xslg,xwoba,xobp,xiso,woba,wrc_plus,exit_velocity_avg,launch_angle_avg,'+
+    'barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip&chart=false&csv=true';
+  try{
+    var txt=await proxyFetch(url);
+    var rows=parseCSV(txt);
+    var sid=String(id);
+    for(var i=0;i<rows.length;i++){
+      var r=rows[i];
+      if(String(r.player_id||r.xmlbamid||r.mlbam_id||'')==sid){
+        // Normalize wRC+ (CSV uses lowercase wrc_plus)
+        r.wRC_plus=nv(r.wrc_plus);
+        return r;
+      }
     }
     return null;
-  }catch{return null;}
+  }catch(e){return null;}
 }
-async function savPitchAdv(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=pitcher&filter=&sort=4&sortDir=desc&min=1&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));return rows.find(r=>String(r.player_id||r.pitcher_id||r.mlbam_id||'')===String(id))||null; // keys already lowercase}catch{return null;}}
-
+async function savPitchPlus(id,yr){
+  var url=SAV+'/leaderboard/pitching-plus?year='+yr+'&csv=true';
+  try{
+    var txt=await proxyFetch(url);
+    var rows=parseCSV(txt);
+    var sid=String(id);
+    for(var i=0;i<rows.length;i++){
+      var r=rows[i];
+      if(String(r.player_id||r.pitcher_id||r.mlbam_id||'')==sid){
+        return{
+          stuff_plus:    nv(r.stuff_plus),
+          location_plus: nv(r.location_plus),
+          pitching_plus: nv(r.pitching_plus),
+        };
+      }
+    }
+    return null;
+  }catch(e){return null;}
+}
+async function savPitchAdv(id,yr){
+  var url=SAV+'/leaderboard/custom?year='+yr+'&type=pitcher&filter=&sort=4&sortDir=desc&min=1'+
+    '&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,'+
+    'p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip&chart=false&csv=true';
+  try{
+    var txt=await proxyFetch(url);
+    var rows=parseCSV(txt);
+    var sid=String(id);
+    for(var i=0;i<rows.length;i++){
+      var r=rows[i];
+      if(String(r.player_id||r.pitcher_id||r.mlbam_id||'')==sid)return r;
+    }
+    return null;
+  }catch(e){return null;}
+}
 // ═══ SCORING ═════════════════════════════════════════════
 // ri: lower=better. g→95, m→50, b→25, aw→~2
 function ri(v,g,m,b,aw){const x=nv(v);if(x===null)return null;if(x<=g)return 95;if(x<=m)return 50+(m-x)/(m-g)*45;if(x<=b)return 25+(b-x)/(b-m)*25;if(x<=aw)return 5+(aw-x)/(aw-b)*20;return 2;}
