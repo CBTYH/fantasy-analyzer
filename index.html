@@ -400,7 +400,26 @@ function calcBatter(s){
 
 // ═══ FETCH ═══════════════════════════════════════════════
 async function jfetch(url,proxy=false){const u=proxy?PROXY+encodeURIComponent(url):url;const r=await fetch(u,{headers:{'Accept':'application/json'}});if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
-async function tfetch(url){try{const r=await fetch(PROXY+encodeURIComponent(url));if(r.ok)return r.text();}catch{}const r2=await fetch(url);if(r2.ok)return r2.text();throw new Error('tfetch failed');}
+// Multi-proxy fetch: tries 3 CORS proxies in sequence for reliability
+const PROXIES=[
+  u=>`https://corsproxy.io/?${encodeURIComponent(u)}`,
+  u=>`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  u=>`https://corsproxy.org/?${encodeURIComponent(u)}`,
+];
+async function tfetch(url,timeout=12000){
+  for(const mkProxy of PROXIES){
+    try{
+      const ctrl=new AbortController();
+      const tid=setTimeout(()=>ctrl.abort(),timeout);
+      const r=await fetch(mkProxy(url),{signal:ctrl.signal});
+      clearTimeout(tid);
+      if(r.ok){const t=await r.text();if(t&&t.length>10&&!t.includes('error')&&!t.includes('Host not'))return t;}
+    }catch{}
+  }
+  // last resort: direct (works if Savant doesn't CORS-block)
+  try{const r=await fetch(url);if(r.ok)return r.text();}catch{}
+  throw new Error('All proxies failed for '+url.split('?')[0]);
+}
 async function mlbF(url){try{return await jfetch(url);}catch{return await jfetch(url,true);}}
 function parseCSV(txt){const lines=txt.trim().split('\n');if(lines.length<2)return[];const h=csvRow(lines[0]).map(x=>x.replace(/"/g,'').trim());return lines.slice(1).map(l=>{const c=csvRow(l);const r={};h.forEach((k,i)=>r[k]=(c[i]||'').replace(/"/g,'').trim());return r;});}
 function csvRow(l){const r=[];let cur='',q=false;for(const c of l){if(c==='"'){q=!q;continue;}if(c===','&&!q){r.push(cur);cur='';continue;}cur+=c;}r.push(cur);return r;}
@@ -413,9 +432,33 @@ async function findPlayer(name){
 async function getStats(id,group,yr){try{const d=await mlbF(`${MLB}/people/${id}/stats?stats=season&group=${group}&season=${yr}&sportId=1`);return d?.stats?.[0]?.splits?.[0]?.stat||null;}catch{return null;}}
 async function getFielding(id,yr){try{const d=await mlbF(`${MLB}/people/${id}/stats?stats=season&group=fielding&season=${yr}&sportId=1`);return d?.stats?.[0]?.splits||[];}catch{return[];}}
 async function getGameLog(id,group,yr,n=7){try{const d=await mlbF(`${MLB}/people/${id}/stats?stats=gameLog&group=${group}&season=${yr}&sportId=1`);return(d?.stats?.[0]?.splits||[]).slice(-n).reverse();}catch{return[];}}
-async function savBat(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=batter&filter=&sort=4&sortDir=desc&min=1&selections=xba,xslg,xwoba,xobp,xiso,woba,wrc_plus,exit_velocity_avg,launch_angle_avg,barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));return rows.find(r=>String(r.player_id||r.xMLBAMID||'')===String(id))||null;}catch{return null;}}
-async function savPitchPlus(id,yr){try{const rows=parseCSV(await tfetch(`${SAV}/leaderboard/pitching-plus?year=${yr}&csv=true`));return rows.find(r=>String(r.pitcher_id||r.player_id||'')===String(id))||null;}catch{return null;}}
-async function savPitchAdv(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=pitcher&filter=&sort=4&sortDir=desc&min=1&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));return rows.find(r=>String(r.player_id||r.pitcher_id||'')===String(id))||null;}catch{return null;}}
+async function savBat(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=batter&filter=&sort=4&sortDir=desc&min=1&selections=xba,xslg,xwoba,xobp,xiso,woba,wrc_plus,exit_velocity_avg,launch_angle_avg,barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));const row=rows.find(r=>String(r.player_id||r.xMLBAMID||r.mlbam_id||'')===String(id));
+    if(row){// normalize wRC+ column (Savant uses lowercase)
+      if(row.wrc_plus!==undefined)row.wRC_plus=row.wrc_plus;
+      return row;} return null;}catch{return null;}}
+async function savPitchPlus(id,yr){
+  try{
+    const rows=parseCSV(await tfetch(`${SAV}/leaderboard/pitching-plus?year=${yr}&csv=true`));
+    if(!rows.length)return null;
+    // Try multiple possible ID column names Savant has used over the years
+    const match=rows.find(r=>{
+      const rid=String(r.player_id||r.pitcher_id||r.mlbam_id||r.xMLBAMID||r.IDfg||'');
+      return rid===String(id);
+    });
+    if(match){
+      // Normalize column names (Savant sometimes prefixes with table name)
+      return{
+        stuff_plus:    match.stuff_plus    ||match['stuff_plus_stuff_plus']    ||null,
+        location_plus: match.location_plus ||match['location_plus_location_plus']||null,
+        pitching_plus: match.pitching_plus ||match['pitching_plus_pitching_plus']||null,
+        player_name:   match.player_name   ||match.pitcher_name||null,
+        _raw: match,
+      };
+    }
+    return null;
+  }catch{return null;}
+}
+async function savPitchAdv(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=pitcher&filter=&sort=4&sortDir=desc&min=1&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));return rows.find(r=>String(r.player_id||r.pitcher_id||r.mlbam_id||'')===String(id))||null;}catch{return null;}}
 
 // ═══ SCORING ═════════════════════════════════════════════
 // ri: lower=better. g→95, m→50, b→25, aw→~2
@@ -525,7 +568,13 @@ async function fetchAndBuild(name,typeHint,season,logEl){
   if(type==='batter')sav=await savBat(id,season);
   else[splus,sadv]=await Promise.all([savPitchPlus(id,season),savPitchAdv(id,season)]);
   const savOk=sav||splus||sadv;
-  steps[3]=[savOk?'✓':'⚠',savOk?'Statcast loaded':'Statcast unavailable (calculated stats shown)','done'];steps[4][2]='act';setLog(logEl,steps);
+  const stuffOk=type==='pitcher'?(splus?.stuff_plus!=null):true;
+  const advOk=type==='pitcher'?(sadv!=null):true;
+  const batOk=type==='batter'?(sav!=null):true;
+  const savMsg=type==='pitcher'
+    ?(splus&&stuffOk?'Statcast loaded (incl. Stuff+)':splus&&!stuffOk?'Statcast partial (no Stuff+ for this player)':sadv?'Statcast partial (Stuff+ unavailable)':'Statcast unavailable')
+    :(batOk?'Statcast loaded':'Statcast unavailable (calculated stats shown)');
+  steps[3]=[savOk?'✓':'⚠',savMsg,'done'];steps[4][2]='act';setLog(logEl,steps);
 
   const raw=type==='batter'?(hitStat||{}):(pitStat||{});
   const S={...raw,...(sav||{}),...(splus||{}),...(sadv||{})};
@@ -594,7 +643,7 @@ function renderPlayer(d,addBtn=false){
     <div class="sec">Rate Stats<span class="src">calc</span></div><div class="sgrid">
       ${sc('K%',S.k_pct,'k_pct','pitcher',v=>fp(v),true)}${sc('BB%',S.bb_pct,'bb_pct','pitcher',v=>fp(v),true)}${sc('K-BB%',S.kbb_pct,'kbb','pitcher',v=>fp(v),true)}</div>
     <div class="sec">Statcast<span class="src">Baseball Savant</span></div><div class="sgrid">
-      ${sc('Stuff+',S.stuff_plus,'stuff_p','pitcher',0)}${sc('Location+',S.location_plus,'loc_p','pitcher',0)}${sc('Pitching+',S.pitching_plus,'pit_p','pitcher',0)}</div>
+      ${sc('Stuff+',S.stuff_plus,'stuff_p','pitcher',0)}${sc('Location+',S.location_plus,'loc_p','pitcher',0)}${sc('Pitching+',S.pitching_plus,'pit_p','pitcher',0)}${(S.stuff_plus===null&&S.location_plus===null)?`<div style="font-size:9px;color:var(--tx3);grid-column:1/-1;margin-top:2px">Stuff+ data requires qualifying IP. May not be available for relievers or early-season stats.</div>`:''}</div>
     ${glHtml}`;
 
   const addBtnHtml=addBtn?`<button class="btn sec" style="font-size:10px;padding:4px 9px" onclick="addToCompare(window.__last)">+ Compare</button>`:'';
