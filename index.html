@@ -408,11 +408,14 @@ async function jfetch(url, useProxy) {
 async function mlbF(url) {
   try { return await jfetch(url); } catch(e) { return await jfetch(url, true); }
 }
-// Savant CSV — tries corsproxy.io, then allorigins, then direct
+// Savant CSV — tries multiple CORS proxies for reliability
 async function csvFetch(url) {
+  var enc = encodeURIComponent(url);
   var proxies = [
-    'https://corsproxy.io/?' + encodeURIComponent(url),
-    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    'https://api.allorigins.win/raw?url=' + enc,
+    'https://corsproxy.io/?' + enc,
+    'https://corsproxy.org/?' + enc,
+    'https://thingproxy.freeboard.io/fetch/' + url,
     url
   ];
   for (var i = 0; i < proxies.length; i++) {
