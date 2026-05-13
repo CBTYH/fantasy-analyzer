@@ -424,11 +424,12 @@ async function mlbF(url){try{return await jfetch(url);}catch{return await jfetch
 function parseCSV(txt){
   if(!txt||typeof txt!=='string')return[];
   const trimmed=txt.trim();
-  // Validate it's actually CSV (not HTML error page)
-  if(trimmed.startsWith('<')||trimmed.startsWith('{')||trimmed.includes('<html')||trimmed.includes('error'))return[];
+  const fc=trimmed[0];
+  // Reject HTML/JSON error responses (real CSV starts with a letter or quote)
+  if(fc==='<'||fc==='{' ||fc==='['||trimmed.slice(0,50).toLowerCase().includes('<html'))return[];
   const lines=trimmed.split('\n');
   if(lines.length<2)return[];
-  const h=csvRow(lines[0]).map(x=>x.replace(/"/g,'').trim().toLowerCase()); // lowercase headers!
+  const h=csvRow(lines[0]).map(x=>x.replace(/"/g,'').trim().toLowerCase());
   return lines.slice(1).filter(l=>l.trim()).map(l=>{const c=csvRow(l);const r={};h.forEach((k,i)=>r[k]=(c[i]||'').replace(/"/g,'').trim());return r;});
 }
 function csvRow(l){const r=[];let cur='',q=false;for(const c of l){if(c==='"'){q=!q;continue;}if(c===','&&!q){r.push(cur);cur='';continue;}cur+=c;}r.push(cur);return r;}
