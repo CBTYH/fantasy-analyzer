@@ -421,7 +421,16 @@ async function tfetch(url,timeout=12000){
   throw new Error('All proxies failed for '+url.split('?')[0]);
 }
 async function mlbF(url){try{return await jfetch(url);}catch{return await jfetch(url,true);}}
-function parseCSV(txt){const lines=txt.trim().split('\n');if(lines.length<2)return[];const h=csvRow(lines[0]).map(x=>x.replace(/"/g,'').trim());return lines.slice(1).map(l=>{const c=csvRow(l);const r={};h.forEach((k,i)=>r[k]=(c[i]||'').replace(/"/g,'').trim());return r;});}
+function parseCSV(txt){
+  if(!txt||typeof txt!=='string')return[];
+  const trimmed=txt.trim();
+  // Validate it's actually CSV (not HTML error page)
+  if(trimmed.startsWith('<')||trimmed.startsWith('{')||trimmed.includes('<html')||trimmed.includes('error'))return[];
+  const lines=trimmed.split('\n');
+  if(lines.length<2)return[];
+  const h=csvRow(lines[0]).map(x=>x.replace(/"/g,'').trim().toLowerCase()); // lowercase headers!
+  return lines.slice(1).filter(l=>l.trim()).map(l=>{const c=csvRow(l);const r={};h.forEach((k,i)=>r[k]=(c[i]||'').replace(/"/g,'').trim());return r;});
+}
 function csvRow(l){const r=[];let cur='',q=false;for(const c of l){if(c==='"'){q=!q;continue;}if(c===','&&!q){r.push(cur);cur='';continue;}cur+=c;}r.push(cur);return r;}
 
 async function findPlayer(name){
@@ -432,33 +441,35 @@ async function findPlayer(name){
 async function getStats(id,group,yr){try{const d=await mlbF(`${MLB}/people/${id}/stats?stats=season&group=${group}&season=${yr}&sportId=1`);return d?.stats?.[0]?.splits?.[0]?.stat||null;}catch{return null;}}
 async function getFielding(id,yr){try{const d=await mlbF(`${MLB}/people/${id}/stats?stats=season&group=fielding&season=${yr}&sportId=1`);return d?.stats?.[0]?.splits||[];}catch{return[];}}
 async function getGameLog(id,group,yr,n=7){try{const d=await mlbF(`${MLB}/people/${id}/stats?stats=gameLog&group=${group}&season=${yr}&sportId=1`);return(d?.stats?.[0]?.splits||[]).slice(-n).reverse();}catch{return[];}}
-async function savBat(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=batter&filter=&sort=4&sortDir=desc&min=1&selections=xba,xslg,xwoba,xobp,xiso,woba,wrc_plus,exit_velocity_avg,launch_angle_avg,barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));const row=rows.find(r=>String(r.player_id||r.xMLBAMID||r.mlbam_id||'')===String(id));
-    if(row){// normalize wRC+ column (Savant uses lowercase)
-      if(row.wrc_plus!==undefined)row.wRC_plus=row.wrc_plus;
-      return row;} return null;}catch{return null;}}
+async function savBat(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=batter&filter=&sort=4&sortDir=desc&min=1&selections=xba,xslg,xwoba,xobp,xiso,woba,wrc_plus,exit_velocity_avg,launch_angle_avg,barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));// All keys lowercased; Savant uses player_id for MLBAM ID
+    const row=rows.find(r=>String(r.player_id||r.xmlbamid||r.mlbam_id||'')===String(id));
+    if(row){row.wRC_plus=nv(row.wrc_plus);return row;}
+    return null;}catch{return null;}}
 async function savPitchPlus(id,yr){
   try{
-    const rows=parseCSV(await tfetch(`${SAV}/leaderboard/pitching-plus?year=${yr}&csv=true`));
-    if(!rows.length)return null;
+    const raw=await tfetch(`${SAV}/leaderboard/pitching-plus?year=${yr}&csv=true`);
+    const rows=parseCSV(raw);
+    console.log(`[Stuff+] CSV rows: ${rows.length}, looking for id=${id}`);
+    if(rows.length>0)console.log(`[Stuff+] Sample row keys:`,Object.keys(rows[0]));
+    if(!rows.length){console.warn('[Stuff+] No rows - raw preview:',raw?.slice?.(0,200));return null;}
     // Try multiple possible ID column names Savant has used over the years
+    // All keys are lowercase now (parseCSV lowercases headers)
     const match=rows.find(r=>{
-      const rid=String(r.player_id||r.pitcher_id||r.mlbam_id||r.xMLBAMID||r.IDfg||'');
+      const rid=String(r.player_id||r.pitcher_id||r.mlbam_id||r.xmlbamid||r.idfg||'');
       return rid===String(id);
     });
     if(match){
-      // Normalize column names (Savant sometimes prefixes with table name)
       return{
-        stuff_plus:    match.stuff_plus    ||match['stuff_plus_stuff_plus']    ||null,
-        location_plus: match.location_plus ||match['location_plus_location_plus']||null,
-        pitching_plus: match.pitching_plus ||match['pitching_plus_pitching_plus']||null,
-        player_name:   match.player_name   ||match.pitcher_name||null,
-        _raw: match,
+        stuff_plus:    nv(match.stuff_plus)    ??nv(match['stuff_plus_stuff_plus'])    ??null,
+        location_plus: nv(match.location_plus) ??nv(match['location_plus_location_plus'])??null,
+        pitching_plus: nv(match.pitching_plus) ??nv(match['pitching_plus_pitching_plus'])??null,
+        player_name:   match.player_name||match.pitcher_name||null,
       };
     }
     return null;
   }catch{return null;}
 }
-async function savPitchAdv(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=pitcher&filter=&sort=4&sortDir=desc&min=1&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));return rows.find(r=>String(r.player_id||r.pitcher_id||r.mlbam_id||'')===String(id))||null;}catch{return null;}}
+async function savPitchAdv(id,yr){const url=`${SAV}/leaderboard/custom?year=${yr}&type=pitcher&filter=&sort=4&sortDir=desc&min=1&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip&chart=false&csv=true`;try{const rows=parseCSV(await tfetch(url));return rows.find(r=>String(r.player_id||r.pitcher_id||r.mlbam_id||'')===String(id))||null; // keys already lowercase}catch{return null;}}
 
 // ═══ SCORING ═════════════════════════════════════════════
 // ri: lower=better. g→95, m→50, b→25, aw→~2
@@ -582,7 +593,10 @@ async function fetchAndBuild(name,typeHint,season,logEl){
   Object.assign(S,calc);
 
   if(type==='batter'){
-    S.woba=nv(S.woba)||calc.woba;S.xwoba=nv(S.xwoba);S.xba=nv(S.xba);S.xslg=nv(S.xslg);
+    // Savant CSV headers are lowercased; map all possible variants
+    S.woba=nv(S.woba)||nv(S.wOBA)||calc.woba;
+    S.xwoba=nv(S.xwoba)||nv(S.xwOBA);
+    S.xba=nv(S.xba);S.xslg=nv(S.xslg);
     S.babip=calc.babip??nv(S.babip);// prefer calculated (Fangraphs-equivalent)
     S.iso=calc.iso??nv(S.iso);
     S.k_pct=calc.k_pct??nv(S.k_percent||S.k_pct);
