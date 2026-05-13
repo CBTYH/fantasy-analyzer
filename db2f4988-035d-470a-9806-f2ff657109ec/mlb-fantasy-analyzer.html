@@ -160,6 +160,8 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,'Helvetica N
 .ct .sr td{background:var(--bg3);font-size:8px;font-weight:700;letter-spacing:.7px;color:var(--tx3);text-transform:uppercase;padding:3px 9px}
 .ct .sr td:first-child{position:sticky;left:0;z-index:1}
 
+.slot[draggable="true"]:hover{box-shadow:0 0 0 1.5px var(--bl2);}
+.slot.drag-over{border-color:var(--bl)!important;background:rgba(59,130,246,.08)!important;}
 /* ═══ BAR CHART ═══ */
 .chart-wrap{padding:.3rem 0}
 .chart-sec{margin-bottom:1.2rem}
@@ -176,8 +178,7 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,'Helvetica N
 .brow-player-name{font-size:9px;color:var(--tx3);width:60px;flex-shrink:0;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .brow-track{flex:1;background:var(--bg3);border-radius:3px;height:12px;position:relative;overflow:hidden}
 .brow-fill{height:100%;border-radius:3px;transition:width .6s ease;position:relative}
-.brow-val{font-size:9px;font-weight:600;width:46px;flex-shrink:0;text-align:right}
-.brow-pct{font-size:9px;color:var(--tx3);width:28px;flex-shrink:0;text-align:right}
+.brow-pct{font-size:10px;width:36px;flex-shrink:0;text-align:right;font-weight:600}
 
 @media(max-width:680px){.cslots{grid-template-columns:repeat(2,1fr)}.sbars{grid-template-columns:repeat(2,1fr)}.sgrid{grid-template-columns:repeat(3,1fr)}.cheader{flex-direction:column}}
 </style>
@@ -274,6 +275,7 @@ const PCT={
     barrel_batted_rate:{bad:2,med:8.5,good:13,el:18.5,hi:true,d:1,pct:true},
     sprint_speed:{bad:23.8,med:27.8,good:29.0,el:30.5,hi:true,d:1},
     nsb:        {bad:-3,med:4,good:14,el:32,hi:true,d:0,c:true},
+    wRC_plus:   {bad:62,med:100,good:125,el:158,hi:true,d:0},
   },
   pitcher:{
     era:      {g:2.5,m:4.2,b:5.0,aw:6.2,hi:false,d:2},
@@ -564,7 +566,7 @@ async function fetchAndBuild(name,typeHint,season,logEl){
 function renderPlayer(d,addBtn=false){
   const isP=d.type==='pitcher',av=isP?'p':'b',s=d.fantasy_score,sc2=scClass(s),S=d.stats;
   const bdims=isP?[['ERA/WHIP','era_whip'],['PERIPHERALS','peripherals'],['STRIKEOUTS','strikeouts'],['COMMAND','command'],['STUFF+','stuff'],['WORKLOAD','workload']]:[['POWER','power'],['OBP+WALKS','obp_bb'],['SPEED/NSB','speed'],['TRUE VALUE','true_v'],['CONTACT','contact']];
-  const bars=bdims.map(([l,k])=>{const v=d.breakdown?.[k];if(v===null||v===undefined)return'';const col=barCol(v);return`<div class="sbar"><div class="sb-l">${l}</div><div class="sb-t"><div class="sb-f" style="width:${v}%;background:${col}"></div></div><div class="sb-v" style="color:${col}">${v}</div></div>`;}).join('');
+  const bars=bdims.map(([l,k])=>{const v=d.breakdown?.[k];if(v===null||v===undefined)return'';const vr=Math.round(v);const col=barCol(vr);return`<div class="sbar"><div class="sb-l">${l}</div><div class="sb-t"><div class="sb-f" style="width:${vr}%;background:${col}"></div></div><div class="sb-v" style="color:${col}">${vr}</div></div>`;}).join('');
 
   let posHtml='';
   if(!isP&&d.fieldingSplits?.length){const rows=d.fieldingSplits.filter(s=>s.position&&(s.stat?.gamesPlayed||0)>0).sort((a,b)=>(b.stat?.gamesPlayed||0)-(a.stat?.gamesPlayed||0));if(rows.length)posHtml=`<div class="sec">Position Breakdown</div><table class="ptable"><thead><tr><th>Pos</th><th>G</th><th>GS</th><th>Inn</th></tr></thead><tbody>${rows.map(r=>`<tr><td class="${r.position?.abbreviation?.toUpperCase()===d.position?'hi':''}">${r.position?.abbreviation||'—'}</td><td>${f0(r.stat?.gamesPlayed)}</td><td>${f0(r.stat?.gamesStarted)}</td><td>${fip2(r.stat?.innings)}</td></tr>`).join('')}</tbody></table>`;}
@@ -602,18 +604,18 @@ function renderPlayer(d,addBtn=false){
 // ═══ PERCENTILE ══════════════════════════════════════════
 function calcPct(val,ref){
   const v=nv(val);if(v===null)return null;
+  let p;
   if(ref.hi===false){
-    // lower=better: use g/m/b/aw
     const{g,m,b,aw}=ref;
-    if(v<=g)return 99;if(v<=m)return 50+(m-v)/(m-g)*49;
-    if(v<=b)return 25+(b-v)/(b-m)*25;if(v<=aw)return 5+(aw-v)/(aw-b)*20;return 2;
+    if(v<=g)p=99;else if(v<=m)p=50+(m-v)/(m-g)*49;
+    else if(v<=b)p=25+(b-v)/(b-m)*25;else if(v<=aw)p=5+(aw-v)/(aw-b)*20;else p=2;
   } else {
-    // higher=better: use bad/med/good/el
     const{bad,med,good,el}=ref;
-    if(v>=el)return 99;if(v>=good)return 75+(v-good)/(el-good)*24;
-    if(v>=med)return 50+(v-med)/(good-med)*25;if(v>=bad)return 25+(v-bad)/(med-bad)*25;
-    return Math.max(2,25*(v/bad));
+    if(v>=el)p=99;else if(v>=good)p=75+(v-good)/(el-good)*24;
+    else if(v>=med)p=50+(v-med)/(good-med)*25;else if(v>=bad)p=25+(v-bad)/(med-bad)*25;
+    else p=Math.max(2,25*(v/bad));
   }
+  return Math.round(p); // always integer
 }
 function pctColor(p){return p>=80?'#22c55e':p>=60?'#86efac':p>=40?'#f59e0b':p>=20?'#fb923c':'#ef4444';}
 
@@ -630,6 +632,7 @@ function renderBarChart(players){
     {key:'exit_velocity_avg',lbl:'Exit Vel'},{key:'hard_hit_percent',lbl:'Hard Hit%'},
     {key:'barrel_batted_rate',lbl:'Barrel%'},{key:'sprint_speed',lbl:'Sprint Spd'},
     {key:'nsb',lbl:'NSB'},
+    {key:'wRC_plus',lbl:'wRC+'},
   ];
   const pitStats=[
     {key:'era',lbl:'ERA'},{key:'whip',lbl:'WHIP'},{key:'strikeoutsPer9Inn',lbl:'K/9'},
@@ -663,8 +666,7 @@ function renderBarChart(players){
           <div style="position:absolute;top:0;left:25%;width:1px;height:100%;background:rgba(255,255,255,.06)"></div>
           <div style="position:absolute;top:0;left:75%;width:1px;height:100%;background:rgba(255,255,255,.06)"></div>
         </div>
-        <div class="brow-val" style="color:${col}">${disp}</div>
-        <div class="brow-pct" style="color:${pctColor(pct)}">${pct}th</div>
+        <div class="brow-pct" style="color:${pctColor(pct)};font-weight:600;font-size:10px">${pct}th</div>
       </div>`;
     }).join('');
     if(!playerBars.trim())return'';
@@ -755,16 +757,70 @@ function renderCompare(){
 }
 function setCView(v){cView=v;document.querySelectorAll('.vtab').forEach((el,i)=>el.classList.toggle('active',['table','chart'][i]===v));document.getElementById('cv-table').style.display=v==='table'?'':'none';document.getElementById('cv-chart').style.display=v==='chart'?'':'none';}
 
-// ═══ SLOT UI ═════════════════════════════════════════════
+// ═══ SLOT UI (drag-to-reorder + year switcher) ══════════
+let dragSrc=null;
+
 function refreshSlots(){
   const grid=document.getElementById('cslots-grid');
   const n=filled().length;
   grid.innerHTML=slots.map((p,i)=>{
-    if(p)return`<div class="slot filled" style="border-color:${COLORS[i]};border-left:3px solid ${COLORS[i]}"><div class="swatch" style="background:${COLORS[i]}"></div><div style="flex:1;min-width:0"><div class="slot-name">${p.name}</div><div class="slot-sub">${p.teamAbbr}·${p.position}·${p.season}</div></div><button class="btn del" style="font-size:9px;padding:3px 7px;flex-shrink:0" onclick="clearSlot(${i})">✕</button></div>`;
+    if(p){
+      const yrOpts=['2026','2025','2024','2023','2022','2021'].map(y=>`<option value="${y}"${y===p.season?'selected':''}>${y}</option>`).join('');
+      return`<div class="slot filled" draggable="true"
+          data-idx="${i}"
+          style="border-color:${COLORS[i]};border-left:3px solid ${COLORS[i]};cursor:grab"
+          ondragstart="dragStart(event,${i})"
+          ondragover="dragOver(event)"
+          ondrop="dragDrop(event,${i})"
+          ondragend="dragEnd()">
+        <div class="swatch" style="background:${COLORS[i]}"></div>
+        <div style="flex:1;min-width:0">
+          <div class="slot-name">${p.name}</div>
+          <div style="display:flex;align-items:center;gap:5px;margin-top:3px">
+            <span style="font-size:10px;color:var(--tx2)">${p.teamAbbr}·${p.position}</span>
+            <select onchange="changeSlotYear(${i},this.value)"
+              style="font-size:10px;background:var(--bg4);border:.5px solid var(--bd2);color:var(--tx2);border-radius:4px;padding:1px 4px;cursor:pointer"
+              onclick="event.stopPropagation()">
+              ${yrOpts}
+            </select>
+          </div>
+        </div>
+        <button class="btn del" style="font-size:9px;padding:3px 7px;flex-shrink:0"
+          onclick="event.stopPropagation();clearSlot(${i})">✕</button>
+      </div>`;
+    }
     if(i===n)return`<div class="slot" onclick="openSlot(${i})"><span style="font-size:18px">＋</span><span>Add Player ${i+1}</span></div>`;
     return`<div class="slot" style="opacity:.2;cursor:default;pointer-events:none"><span>—</span></div>`;
   }).join('');
 }
+
+// Drag-to-reorder
+function dragStart(e,i){dragSrc=i;e.dataTransfer.effectAllowed='move';e.currentTarget.style.opacity='.5';}
+function dragOver(e){e.preventDefault();e.dataTransfer.dropEffect='move';return false;}
+function dragDrop(e,i){
+  e.stopPropagation();
+  if(dragSrc===null||dragSrc===i)return false;
+  const tmp=slots[dragSrc];slots[dragSrc]=slots[i];slots[i]=tmp;
+  dragSrc=null;refreshSlots();if(filled().length>=2)renderCompare();return false;
+}
+function dragEnd(){dragSrc=null;document.querySelectorAll('.slot').forEach(el=>el.style.opacity='');}
+
+// Change year for existing slot
+async function changeSlotYear(i,yr){
+  const p=slots[i];if(!p||p.season===yr)return;
+  const el=document.getElementById('compare-area');
+  el.innerHTML=`<div class="loading"><div class="spin"></div>Loading ${p.name} ${yr}…</div><div id="yp"></div>`;
+  try{
+    const d=await fetchAndBuild(p.name,p.type,yr,document.getElementById('yp'));
+    slots[i]=d;refreshSlots();if(filled().length>=2)renderCompare();
+  }catch(ex){
+    // restore old year on error
+    const sel=document.querySelectorAll('.slot select')[i];if(sel)sel.value=p.season;
+    el.innerHTML=`<div class="err">Could not load ${yr} data for ${p.name}: ${ex.message}</div>`;
+    if(filled().length>=2)setTimeout(renderCompare,1500);
+  }
+}
+
 function openSlot(i){activeSlot=i;document.getElementById('slot-row').style.display='flex';document.getElementById('slot-input').focus();}
 function closeSlot(){activeSlot=null;document.getElementById('slot-row').style.display='none';document.getElementById('slot-input').value='';}
 function clearSlot(i){slots[i]=null;const f=slots.filter(s=>s!==null);slots=Array(MAX_SLOTS).fill(null);f.forEach((p,j)=>slots[j]=p);refreshSlots();if(filled().length>=2)renderCompare();else document.getElementById('compare-area').innerHTML=`<div class="empty"><div class="ic">⚖️</div>Add 2–6 players above to compare</div>`;}
