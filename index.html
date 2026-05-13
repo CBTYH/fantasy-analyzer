@@ -399,183 +399,112 @@ function calcBatter(s){
 }
 
 // ═══ FETCH ═══════════════════════════════════════════════
-const P1 = 'https://corsproxy.io/?';
-const P2 = 'https://api.allorigins.win/raw?url=';
-const P3 = 'https://corsproxy.org/?';
-
-// Standard MLB API fetch (works directly from browser - CORS enabled)
-async function mlbF(url) {
-  // Try direct first (MLB API supports CORS)
-  try {
-    var r = await fetch(url, {headers: {'Accept': 'application/json'}});
-    if (r.ok) return r.json();
-  } catch(e) {}
-  // Proxy fallback
-  try {
-    var r2 = await fetch(P1 + encodeURIComponent(url), {headers: {'Accept': 'application/json'}});
-    if (r2.ok) return r2.json();
-  } catch(e) {}
-  throw new Error('MLB API unreachable');
+async function jfetch(url, useProxy) {
+  var u = useProxy ? (PROXY + encodeURIComponent(url)) : url;
+  var r = await fetch(u, {headers: {'Accept': 'application/json'}});
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
 }
-
-// Savant CSV fetch - needs CORS proxy
-async function savantFetch(url) {
-  var proxies = [P1, P2, P3];
+async function mlbF(url) {
+  try { return await jfetch(url); } catch(e) { return await jfetch(url, true); }
+}
+// Savant CSV — tries corsproxy.io, then allorigins, then direct
+async function csvFetch(url) {
+  var proxies = [
+    'https://corsproxy.io/?' + encodeURIComponent(url),
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    url
+  ];
   for (var i = 0; i < proxies.length; i++) {
     try {
-      var ctrl = new AbortController();
-      var tid = setTimeout(function(){ ctrl.abort(); }, 10000);
-      var r = await fetch(proxies[i] + encodeURIComponent(url), {signal: ctrl.signal});
-      clearTimeout(tid);
+      var r = await fetch(proxies[i]);
       if (!r.ok) continue;
-      var txt = await r.text();
-      // Validate it's actually CSV (not an error HTML page)
-      if (!txt || txt.length < 20) continue;
-      var first = txt.trim().charAt(0);
-      if (first === '<' || first === '{') continue;
-      return txt;
+      var t = await r.text();
+      if (t && t.length > 50 && t.indexOf('<html') === -1 && t.indexOf('<!DOCTYPE') === -1) return t;
     } catch(e) {}
   }
-  return null; // all proxies failed
+  return '';
 }
-
-// Parse CSV with lowercase headers
 function parseCSV(txt) {
-  if (!txt || typeof txt !== 'string' || txt.length < 10) return [];
-  var trimmed = txt.trim();
-  if (trimmed.charAt(0) === '<') return []; // HTML error page
-  var lines = trimmed.split('\n');
+  if (!txt) return [];
+  var lines = txt.trim().split('\n');
   if (lines.length < 2) return [];
-  // Lowercase headers for consistent key matching
-  var headers = lines[0].split(',').map(function(h) {
-    return h.replace(/"/g, '').trim().toLowerCase();
+  var h = lines[0].split(',').map(function(x){ return x.replace(/"/g,'').trim().toLowerCase(); });
+  return lines.slice(1).filter(function(l){ return l.trim(); }).map(function(l) {
+    var cols = csvLine(l), row = {};
+    for (var j = 0; j < h.length; j++) row[h[j]] = (cols[j]||'').replace(/"/g,'').trim();
+    return row;
   });
-  var rows = [];
-  for (var i = 1; i < lines.length; i++) {
-    var line = lines[i].trim();
-    if (!line) continue;
-    var cols = splitCSV(line);
-    var row = {};
-    for (var j = 0; j < headers.length; j++) {
-      row[headers[j]] = (cols[j] || '').replace(/"/g, '').trim();
-    }
-    rows.push(row);
+}
+function csvLine(s) {
+  var r=[], c='', q=false;
+  for (var i=0;i<s.length;i++) {
+    if (s[i]==='"') { q=!q; continue; }
+    if (s[i]===',' && !q) { r.push(c); c=''; continue; }
+    c+=s[i];
   }
-  return rows;
+  r.push(c); return r;
 }
-function splitCSV(line) {
-  var result = [], cur = '', inQ = false;
-  for (var i = 0; i < line.length; i++) {
-    var c = line[i];
-    if (c === '"') { inQ = !inQ; continue; }
-    if (c === ',' && !inQ) { result.push(cur); cur = ''; continue; }
-    cur += c;
-  }
-  result.push(cur);
-  return result;
-}
-
-// Find player by name via MLB Stats API
-async function findPlayer(name) {
-  var url = MLB + '/people/search?names=' + encodeURIComponent(name) + '&sportId=1';
-  var data = await mlbF(url);
-  var ppl = (data && data.people) ? data.people : [];
-  if (!ppl.length) throw new Error('No player found: "' + name + '"');
-  ppl.sort(function(a, b) {
-    return ((b.active ? 1 : 0) - (a.active ? 1 : 0)) || ((b.currentAge || 0) - (a.currentAge || 0));
-  });
-  return ppl[0];
-}
-
-// Get season stats from MLB API
-async function getStats(id, group, yr) {
-  try {
-    var url = MLB + '/people/' + id + '/stats?stats=season&group=' + group + '&season=' + yr + '&sportId=1';
-    var data = await mlbF(url);
-    var splits = (data && data.stats && data.stats[0]) ? data.stats[0].splits : [];
-    return (splits && splits[0]) ? splits[0].stat : null;
-  } catch(e) { return null; }
-}
-
-// Get fielding splits (position breakdown)
-async function getFielding(id, yr) {
-  try {
-    var url = MLB + '/people/' + id + '/stats?stats=season&group=fielding&season=' + yr + '&sportId=1';
-    var data = await mlbF(url);
-    return (data && data.stats && data.stats[0]) ? (data.stats[0].splits || []) : [];
-  } catch(e) { return []; }
-}
-
-// Get game log
-async function getGameLog(id, group, yr, n) {
-  n = n || 7;
-  try {
-    var url = MLB + '/people/' + id + '/stats?stats=gameLog&group=' + group + '&season=' + yr + '&sportId=1';
-    var data = await mlbF(url);
-    var splits = (data && data.stats && data.stats[0]) ? (data.stats[0].splits || []) : [];
-    return splits.slice(-n).reverse();
-  } catch(e) { return []; }
-}
-
-// Find row by MLBAM ID (handles various column name spellings)
-function findById(rows, id) {
+function byId(rows, id) {
   var sid = String(id);
-  for (var i = 0; i < rows.length; i++) {
-    var r = rows[i];
-    var rid = String(r.player_id || r.pitcher_id || r.mlbam_id || r.xmlbamid || r.xmlbamid || r['player id'] || '');
-    if (rid === sid) return r;
+  for (var i=0; i<rows.length; i++) {
+    var v = String(rows[i].player_id||rows[i].pitcher_id||rows[i].mlbam_id||rows[i].xmlbamid||'');
+    if (v === sid) return rows[i];
   }
   return null;
 }
-
-// Savant batter Statcast leaderboard
+async function findPlayer(name) {
+  var d = await mlbF(MLB+'/people/search?names='+encodeURIComponent(name)+'&sportId=1');
+  var p = (d && d.people) ? d.people : [];
+  if (!p.length) throw new Error('No player found: "'+name+'"');
+  return p.sort(function(a,b){ return ((b.active?1:0)-(a.active?1:0))||((b.currentAge||0)-(a.currentAge||0)); })[0];
+}
+async function getStats(id, group, yr) {
+  try {
+    var d = await mlbF(MLB+'/people/'+id+'/stats?stats=season&group='+group+'&season='+yr+'&sportId=1');
+    return (d&&d.stats&&d.stats[0]&&d.stats[0].splits&&d.stats[0].splits[0]) ? d.stats[0].splits[0].stat : null;
+  } catch(e) { return null; }
+}
+async function getFielding(id, yr) {
+  try {
+    var d = await mlbF(MLB+'/people/'+id+'/stats?stats=season&group=fielding&season='+yr+'&sportId=1');
+    return (d&&d.stats&&d.stats[0]) ? d.stats[0].splits||[] : [];
+  } catch(e) { return []; }
+}
+async function getGameLog(id, group, yr, n) {
+  n = n||7;
+  try {
+    var d = await mlbF(MLB+'/people/'+id+'/stats?stats=gameLog&group='+group+'&season='+yr+'&sportId=1');
+    var s = (d&&d.stats&&d.stats[0]) ? d.stats[0].splits||[] : [];
+    return s.slice(-n).reverse();
+  } catch(e) { return []; }
+}
 async function savBat(id, yr) {
-  var url = SAV + '/leaderboard/custom?year=' + yr +
-    '&type=batter&filter=&sort=4&sortDir=desc&min=1' +
-    '&selections=xba,xslg,xwoba,xobp,xiso,woba,wrc_plus,exit_velocity_avg,' +
-    'launch_angle_avg,barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip' +
-    '&chart=false&csv=true';
   try {
-    var txt = await savantFetch(url);
-    var rows = parseCSV(txt);
-    var row = findById(rows, id);
-    if (row) {
-      row.wRC_plus = nv(row.wrc_plus); // normalize column name
-      return row;
-    }
+    var url = SAV+'/leaderboard/custom?year='+yr+'&type=batter&filter=&sort=4&sortDir=desc&min=1'+
+      '&selections=xba,xslg,xwoba,xobp,xiso,woba,wrc_plus,exit_velocity_avg,launch_angle_avg,'+
+      'barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip&chart=false&csv=true';
+    var rows = parseCSV(await csvFetch(url));
+    var row = byId(rows, id);
+    if (row) { row.wRC_plus = nv(row.wrc_plus); return row; }
     return null;
   } catch(e) { return null; }
 }
-
-// Savant pitcher Stuff+/Location+/Pitching+
 async function savPitchPlus(id, yr) {
-  var url = SAV + '/leaderboard/pitching-plus?year=' + yr + '&csv=true';
   try {
-    var txt = await savantFetch(url);
-    var rows = parseCSV(txt);
-    var row = findById(rows, id);
-    if (row) {
-      return {
-        stuff_plus:    nv(row.stuff_plus),
-        location_plus: nv(row.location_plus),
-        pitching_plus: nv(row.pitching_plus),
-      };
-    }
+    var rows = parseCSV(await csvFetch(SAV+'/leaderboard/pitching-plus?year='+yr+'&csv=true'));
+    var row = byId(rows, id);
+    if (row) return { stuff_plus: nv(row.stuff_plus), location_plus: nv(row.location_plus), pitching_plus: nv(row.pitching_plus) };
     return null;
   } catch(e) { return null; }
 }
-
-// Savant pitcher advanced stats (xERA, FIP, xFIP, K%, BB% etc.)
 async function savPitchAdv(id, yr) {
-  var url = SAV + '/leaderboard/custom?year=' + yr +
-    '&type=pitcher&filter=&sort=4&sortDir=desc&min=1' +
-    '&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,' +
-    'p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip' +
-    '&chart=false&csv=true';
   try {
-    var txt = await savantFetch(url);
-    var rows = parseCSV(txt);
-    return findById(rows, id) || null;
+    var url = SAV+'/leaderboard/custom?year='+yr+'&type=pitcher&filter=&sort=4&sortDir=desc&min=1'+
+      '&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,'+
+      'p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip&chart=false&csv=true';
+    var rows = parseCSV(await csvFetch(url));
+    return byId(rows, id) || null;
   } catch(e) { return null; }
 }
 // ═══ SCORING ═════════════════════════════════════════════
