@@ -414,10 +414,10 @@ async function tfetch(url,timeout=12000){
       const r=await fetch(mkProxy(url),{signal:ctrl.signal});
       clearTimeout(tid);
       if(r.ok){const t=await r.text();if(t&&t.length>10&&!t.includes('error')&&!t.includes('Host not'))return t;}
-    }catch{}
+    }catch(e){}
   }
   // last resort: direct (works if Savant doesn't CORS-block)
-  try{const r=await fetch(url);if(r.ok)return r.text();}catch{}
+  try{const r=await fetch(url);if(r.ok)return r.text();}catch(e){}
   throw new Error('All proxies failed for '+url.split('?')[0]);
 }
 async function mlbF(url){try{return await jfetch(url);}catch{return await jfetch(url,true);}}
@@ -450,9 +450,7 @@ async function savPitchPlus(id,yr){
   try{
     const raw=await tfetch(`${SAV}/leaderboard/pitching-plus?year=${yr}&csv=true`);
     const rows=parseCSV(raw);
-    console.log(`[Stuff+] CSV rows: ${rows.length}, looking for id=${id}`);
-    if(rows.length>0)console.log(`[Stuff+] Sample row keys:`,Object.keys(rows[0]));
-    if(!rows.length){console.warn('[Stuff+] No rows - raw preview:',raw?.slice?.(0,200));return null;}
+    if(!rows.length)return null;
     // Try multiple possible ID column names Savant has used over the years
     // All keys are lowercase now (parseCSV lowercases headers)
     const match=rows.find(r=>{
