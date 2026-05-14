@@ -399,6 +399,7 @@ function calcBatter(s){
 }
 
 // ═══ FETCH ═══════════════════════════════════════════════
+// MLB Stats API: browser can fetch directly (CORS enabled, no proxy needed)
 async function jfetch(url, useProxy) {
   var u = useProxy ? (PROXY + encodeURIComponent(url)) : url;
   var r = await fetch(u, {headers: {'Accept': 'application/json'}});
@@ -408,25 +409,57 @@ async function jfetch(url, useProxy) {
 async function mlbF(url) {
   try { return await jfetch(url); } catch(e) { return await jfetch(url, true); }
 }
-// Savant CSV — tries multiple CORS proxies for reliability
+
+// ─── SAVANT CACHE ─────────────────────────────────────────
+// Load the full leaderboard ONCE per session per year, then lookup per player.
+// This means only 1-3 proxy requests total instead of N requests per search.
+var _savCache = {};  // key: "batter_2026", "pitchAdv_2026", "pitchPlus_2026"
+
 async function csvFetch(url) {
+  // Try multiple proxies; Savant blocks direct browser fetch (CORS)
   var enc = encodeURIComponent(url);
   var proxies = [
     'https://api.allorigins.win/raw?url=' + enc,
     'https://corsproxy.io/?' + enc,
     'https://corsproxy.org/?' + enc,
-    'https://thingproxy.freeboard.io/fetch/' + url,
-    url
   ];
   for (var i = 0; i < proxies.length; i++) {
     try {
       var r = await fetch(proxies[i]);
       if (!r.ok) continue;
       var t = await r.text();
-      if (t && t.length > 50 && t.indexOf('<html') === -1 && t.indexOf('<!DOCTYPE') === -1) return t;
+      if (t && t.length > 100 && t.charAt(0) !== '<' && t.charAt(0) !== '{') return t;
     } catch(e) {}
   }
   return '';
+}
+
+async function getSavBatRows(yr) {
+  var key = 'bat_' + yr;
+  if (_savCache[key]) return _savCache[key];
+  var url = SAV+'/leaderboard/custom?year='+yr+'&type=batter&filter=&sort=4&sortDir=desc&min=1'+
+    '&selections=xba,xslg,xwoba,xobp,xiso,woba,exit_velocity_avg,launch_angle_avg,'+
+    'barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip&chart=false&csv=true';
+  var rows = parseCSV(await csvFetch(url));
+  _savCache[key] = rows;
+  return rows;
+}
+async function getSavPitchAdv(yr) {
+  var key = 'pitchAdv_' + yr;
+  if (_savCache[key]) return _savCache[key];
+  var url = SAV+'/leaderboard/custom?year='+yr+'&type=pitcher&filter=&sort=4&sortDir=desc&min=1'+
+    '&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,'+
+    'p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip&chart=false&csv=true';
+  var rows = parseCSV(await csvFetch(url));
+  _savCache[key] = rows;
+  return rows;
+}
+async function getSavPitchPlus(yr) {
+  var key = 'pitchPlus_' + yr;
+  if (_savCache[key]) return _savCache[key];
+  var rows = parseCSV(await csvFetch(SAV+'/leaderboard/pitching-plus?year='+yr+'&csv=true'));
+  _savCache[key] = rows;
+  return rows;
 }
 function parseCSV(txt) {
   if (!txt) return [];
@@ -482,12 +515,10 @@ async function getGameLog(id, group, yr, n) {
     return s.slice(-n).reverse();
   } catch(e) { return []; }
 }
+// ─── PER-PLAYER SAVANT LOOKUP (uses cache) ────────────────
 async function savBat(id, yr) {
   try {
-    var url = SAV+'/leaderboard/custom?year='+yr+'&type=batter&filter=&sort=4&sortDir=desc&min=1'+
-      '&selections=xba,xslg,xwoba,xobp,xiso,woba,wrc_plus,exit_velocity_avg,launch_angle_avg,'+
-      'barrel_batted_rate,hard_hit_percent,sprint_speed,k_percent,bb_percent,babip&chart=false&csv=true';
-    var rows = parseCSV(await csvFetch(url));
+    var rows = await getSavBatRows(yr);
     var row = byId(rows, id);
     if (row) { row.wRC_plus = nv(row.wrc_plus); return row; }
     return null;
@@ -495,7 +526,7 @@ async function savBat(id, yr) {
 }
 async function savPitchPlus(id, yr) {
   try {
-    var rows = parseCSV(await csvFetch(SAV+'/leaderboard/pitching-plus?year='+yr+'&csv=true'));
+    var rows = await getSavPitchPlus(yr);
     var row = byId(rows, id);
     if (row) return { stuff_plus: nv(row.stuff_plus), location_plus: nv(row.location_plus), pitching_plus: nv(row.pitching_plus) };
     return null;
@@ -503,10 +534,7 @@ async function savPitchPlus(id, yr) {
 }
 async function savPitchAdv(id, yr) {
   try {
-    var url = SAV+'/leaderboard/custom?year='+yr+'&type=pitcher&filter=&sort=4&sortDir=desc&min=1'+
-      '&selections=p_era,p_whip,p_k_percent,p_walk_percent,xera,p_k_per_9,p_bb_per_9,'+
-      'p_hr_per_9,p_babip,p_lob_percent,gb_rate,fip,xfip&chart=false&csv=true';
-    var rows = parseCSV(await csvFetch(url));
+    var rows = await getSavPitchAdv(yr);
     return byId(rows, id) || null;
   } catch(e) { return null; }
 }
@@ -642,7 +670,16 @@ async function fetchAndBuild(name,typeHint,season,logEl){
     S.bb_pct=calc.bb_pct??nv(S.bb_percent||S.bb_pct);
     S.barrel_batted_rate=nv(S.barrel_batted_rate);S.hard_hit_percent=nv(S.hard_hit_percent);
     S.sprint_speed=nv(S.sprint_speed);S.exit_velocity_avg=nv(S.exit_velocity_avg);
-    S.wRC_plus=nv(S.wRC_plus||S.wrc_plus);
+    // wRC+: use Savant value if available, else calculate from wOBA
+    var _wrcSav=nv(S.wRC_plus||S.wrc_plus);
+    if(_wrcSav!==null){S.wRC_plus=_wrcSav;}
+    else if(S.woba!==null&&S.woba!==undefined){
+      var _lgC={2021:{w:.318,s:1.176,r:.120},2022:{w:.312,s:1.156,r:.114},
+                2023:{w:.317,s:1.165,r:.118},2024:{w:.314,s:1.157,r:.116},
+                2025:{w:.312,s:1.155,r:.115},2026:{w:.313,s:1.156,r:.115}};
+      var _c=_lgC[parseInt(season)]||_lgC[2025];
+      S.wRC_plus=Math.round(((S.woba-_c.w)/_c.s+_c.r)/_c.r*100);
+    }
     const sb2=nv(raw.stolenBases),cs=nv(raw.caughtStealing);S.nsb=(sb2!==null&&cs!==null)?sb2-cs:null;
   } else {
     // prefer calculated FIP/xFIP/BABIP over Savant (more accurate from raw data)
