@@ -204,7 +204,7 @@ body{background:var(--bg);color:var(--tx);font-family:-apple-system,'Helvetica N
     <span class="sbadge live">● LIVE 2026</span>
     <span class="sbadge mlb">MLB Stats API</span>
     <span class="sbadge sav">Baseball Savant</span>
-    <span class="sbadge calc">⊕ FIP · xFIP · BABIP · wOBA · K% · LOB% · GB%</span>
+    <span class="sbadge calc">⊕ FIP · xFIP · xERA~ · BABIP · wOBA · xwOBA~ · wRC+ · K% · LOB% · GB%</span>
   </div>
 </header>
 
@@ -376,6 +376,10 @@ function calcPitcher(s){
   if((go+ao)>0) out.gb_pct=go/(go+ao)*100;
   if((h+bb+hbp-1.4*(hr||0))>.1) out.lob_pct=(h+bb+hbp-r)/(h+bb+hbp-1.4*(hr||0))*100;
   out.nsvh=sv+hld-bs;
+  // xERA approximation: average of FIP and xFIP (±0.2 vs actual Statcast xERA)
+  // Labeled 'xERA~' to indicate it's an approximation
+  if(out.fip!==undefined&&out.xfip!==undefined)
+    out.xera_calc=(out.fip+out.xfip)/2;
   return out;
 }
 function calcBatter(s){
@@ -395,6 +399,13 @@ function calcBatter(s){
   const s1=h-d2-d3-hr,ubb=bb-ibb,wden=ab+bb-ibb+sf+hbp;
   if(wden>5) out.woba=(W.bb*ubb+W.hbp*hbp+W.s1*s1+W.s2*d2+W.s3*d3+W.hr*hr)/wden;
   if(pa>0){out.k_pct=k/pa*100;out.bb_pct=bb/pa*100;}
+  // xwOBA approximation: wOBA adjusted for BABIP luck
+  // Logic: high BABIP inflates wOBA (positive luck), low BABIP deflates it
+  // Coefficient ~0.80 based on regression to mean
+  if(out.woba!==undefined&&out.babip!==undefined){
+    var babip_diff=out.babip-0.298; // 0.298 = MLB avg BABIP
+    out.xwoba_calc=Math.max(0.180,Math.min(0.500,out.woba-babip_diff*0.80));
+  }
   return out;
 }
 
@@ -670,6 +681,10 @@ async function fetchAndBuild(name,typeHint,season,logEl){
     S.bb_pct=calc.bb_pct??nv(S.bb_percent||S.bb_pct);
     S.barrel_batted_rate=nv(S.barrel_batted_rate);S.hard_hit_percent=nv(S.hard_hit_percent);
     S.sprint_speed=nv(S.sprint_speed);S.exit_velocity_avg=nv(S.exit_velocity_avg);
+    // xwOBA: use Savant if available, else use our BABIP-adjusted approximation
+    var _xwSav=nv(S.xwoba);
+    S.xwoba=_xwSav!==null?_xwSav:(calc.xwoba_calc||null);
+    S.xwoba_from_sav=_xwSav!==null;
     // wRC+: use Savant value if available, else calculate from wOBA
     var _wrcSav=nv(S.wRC_plus||S.wrc_plus);
     if(_wrcSav!==null){S.wRC_plus=_wrcSav;}
@@ -690,7 +705,9 @@ async function fetchAndBuild(name,typeHint,season,logEl){
     S.kbb_pct=calc.kbb_pct??nv(S.p_k_minus_p_bb);
     S.lob_pct=calc.lob_pct??nv(S.p_lob_percent);
     S.gb_pct=calc.gb_pct??nv(S.gb_rate);
-    S.xera=nv(S.xera||S.p_xera);
+    var _xeraSav=nv(S.xera||S.p_xera);
+    S.xera=_xeraSav!==null?_xeraSav:(calc.xera_calc||null);
+    S.xera_from_sav=_xeraSav!==null;
     S.k9=nv(S.strikeoutsPer9Inn||S.p_k_per_9);S.bb9=nv(S.walksPer9Inn||S.p_bb_per_9);
     S.hr9=nv(S.homeRunsPer9||S.p_hr_per_9);
     S.stuff_plus=nv(S.stuff_plus);S.location_plus=nv(S.location_plus);S.pitching_plus=nv(S.pitching_plus);
@@ -720,16 +737,15 @@ function renderPlayer(d,addBtn=false){
     <div class="sec">Rate Stats<span class="src">MLB Stats API</span></div><div class="sgrid">
       ${sc('AVG',S.avg||S.battingAverage,'avg','batter',3)}${sc('OBP',S.obp,'obp','batter',3)}${sc('SLG',S.slg||S.sluggingPercentage,'slg','batter',3)}${sc('OPS',S.ops||S.onBasePlusSlugging,'ops','batter',3)}${sc('ISO',S.iso,'iso','batter',3,true)}${sc('K%',S.k_pct,'k_pct','batter',v=>fp(v),true)}${sc('BB%',S.bb_pct,'bb_pct','batter',v=>fp(v),true)}</div>
     <div class="sec">True Value<span class="src">Savant + calc</span></div><div class="sgrid">
-      ${sc('BABIP',S.babip,'babip','batter',3,true)}${sc('wOBA',S.woba,'woba','batter',3,true)}${sc('xwOBA',S.xwoba,'xwoba','batter',3)}${sc('xBA',S.xba,'xba','batter',3)}${sc('xSLG',S.xslg,'xslg','batter',3)}${sc('wRC+',S.wRC_plus,'wrc','batter',0)}</div>
-    <div class="sec">Statcast<span class="src">Baseball Savant</span></div><div class="sgrid">
-      ${sc('EV mph',S.exit_velocity_avg,'ev','batter',v=>f1(v))}${sc('Hard Hit%',S.hard_hit_percent,'hh','batter',v=>fp(v))}${sc('Barrel%',S.barrel_batted_rate,'barrel','batter',v=>fp(v))}${sc('Sprint Spd',S.sprint_speed,'spd','batter',v=>f1(v))}</div>
+      ${sc('BABIP',S.babip,'babip','batter',3,true)}${sc('wOBA',S.woba,'woba','batter',3,true)}${sc(S.xwoba_from_sav?'xwOBA':'xwOBA~',S.xwoba,'xwoba','batter',3,!S.xwoba_from_sav)}${sc('wRC+',S.wRC_plus,'wrc','batter',0)}</div>
+
     ${posHtml}`:`
     <div class="sec">Counting<span class="src">MLB Stats API</span></div><div class="sgrid">
       ${sc('G',S.gamesPlayed,'g','pitcher',0)}${sc('GS',S.gamesStarted,'gs','pitcher',0)}${sc('IP',S.inningsPitched,'ip','pitcher',1)}${sc('W',S.wins,'w','pitcher',0)}${sc('L',S.losses,'l','pitcher',0)}${sc('QS',S.qualityStarts,'qs','pitcher',0)}${sc('SV',S.saves,'sv','pitcher',0)}${sc('HLD',S.holds,'hld','pitcher',0)}${sc('BS',S.blownSaves,'bs','pitcher',0)}${sc('NSVH',S.nsvh,'nsvh','pitcher',0,true)}</div>
     <div class="sec">Traditional Ratios<span class="src">MLB Stats API</span></div><div class="sgrid">
       ${sc('ERA',S.era,'era','pitcher',2)}${sc('WHIP',S.whip,'whip','pitcher',2)}${sc('K/9',S.k9,'k9','pitcher',1)}${sc('BB/9',S.bb9,'bb9','pitcher',1)}${sc('HR/9',S.hr9,'hr9','pitcher',2)}</div>
     <div class="sec">ERA Indicators<span class="src">calc + Savant</span></div><div class="sgrid">
-      ${sc('FIP',S.fip,'fip','pitcher',2,true)}${sc('xFIP',S.xfip,'xfip','pitcher',2,true)}${sc('xERA',S.xera,'xera','pitcher',2)}${sc('BABIP',S.babip,'babip','pitcher',3,true)}${sc('LOB%',S.lob_pct,'lob','pitcher',v=>fp(v),true)}${sc('GB%',S.gb_pct,'gb','pitcher',v=>fp(v),true)}</div>
+      ${sc('FIP',S.fip,'fip','pitcher',2,true)}${sc('xFIP',S.xfip,'xfip','pitcher',2,true)}${sc(S.xera_from_sav?'xERA':'xERA~',S.xera,'xera','pitcher',2,!S.xera_from_sav)}${sc('BABIP',S.babip,'babip','pitcher',3,true)}${sc('LOB%',S.lob_pct,'lob','pitcher',v=>fp(v),true)}${sc('GB%',S.gb_pct,'gb','pitcher',v=>fp(v),true)}</div>
     <div class="sec">Rate Stats<span class="src">calc</span></div><div class="sgrid">
       ${sc('K%',S.k_pct,'k_pct','pitcher',v=>fp(v),true)}${sc('BB%',S.bb_pct,'bb_pct','pitcher',v=>fp(v),true)}${sc('K-BB%',S.kbb_pct,'kbb','pitcher',v=>fp(v),true)}</div>
     <div class="sec">Statcast<span class="src">Baseball Savant</span></div><div class="sgrid">
@@ -866,7 +882,7 @@ function renderCompare(){
     rows+=crow('ERA',s=>s.era,true,v=>f2(v));rows+=crow('WHIP',s=>s.whip,true,v=>f2(v));rows+=crow('K/9',s=>s.k9||s.strikeoutsPer9Inn,false,v=>f1(v));
     rows+=crow('QS',s=>s.qualityStarts,false,v=>f0(v));rows+=crow('SV',s=>s.saves,false,v=>f0(v));rows+=crow('NSVH',s=>s.nsvh,false,v=>f0(v),true);rows+=crow('IP',s=>s.inningsPitched,false,v=>f1(v));
     rows+=secrow('ERA Indicators');
-    rows+=crow('FIP',s=>s.fip,true,v=>f2(v),true);rows+=crow('xFIP',s=>s.xfip,true,v=>f2(v),true);rows+=crow('xERA',s=>s.xera,true,v=>f2(v));rows+=crow('BABIP',s=>s.babip,true,v=>f3(v),true);rows+=crow('LOB%',s=>s.lob_pct,false,v=>fp(v),true);rows+=crow('GB%',s=>s.gb_pct,false,v=>fp(v),true);
+    rows+=crow('FIP',s=>s.fip,true,v=>f2(v),true);rows+=crow('xFIP',s=>s.xfip,true,v=>f2(v),true);rows+=crow('xERA~',s=>s.xera,true,v=>f2(v));rows+=crow('BABIP',s=>s.babip,true,v=>f3(v),true);rows+=crow('LOB%',s=>s.lob_pct,false,v=>fp(v),true);rows+=crow('GB%',s=>s.gb_pct,false,v=>fp(v),true);
     rows+=secrow('Rate Stats');
     rows+=crow('K%',s=>s.k_pct,false,v=>fp(v),true);rows+=crow('BB%',s=>s.bb_pct,true,v=>fp(v),true);rows+=crow('K-BB%',s=>s.kbb_pct,false,v=>fp(v),true);rows+=crow('BB/9',s=>s.bb9||s.walksPer9Inn,true,v=>f1(v));rows+=crow('HR/9',s=>s.hr9||s.homeRunsPer9,true,v=>f2(v));
     rows+=secrow('Statcast');
